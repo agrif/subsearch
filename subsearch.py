@@ -49,6 +49,7 @@ class FFmpeg:
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
     def get_image(self, path, start, time, name):
+        image_filename = name + '.png'
         try:
             self.run(
                 '-ss', str(start / 1000),
@@ -59,9 +60,11 @@ class FFmpeg:
                     path.replace("'", r"\'").replace(':', r'\:')),
                 '-vframes', '1',
                 '-f', 'image2',
-                name + '.png')
+                image_filename)
         except Exception as err:
-            log.debug('Caught exception from SS method: %s', err)
+            try:
+                os.unlink(image_filename)
+            except Exception: pass    
             self.run(
                 '-ss', str(start / 1000),
                 '-i', path,
@@ -71,7 +74,8 @@ class FFmpeg:
                 '-map', '[v]',
                 '-vframes', '1',
                 '-f', 'image2',
-                name + '.png')
+                image_filename)
+        return image_filename
 
 @attr.s
 class Result:
