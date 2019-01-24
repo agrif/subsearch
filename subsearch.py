@@ -4,8 +4,7 @@ import json
 import os
 import os.path
 import random
-import logging
-import sys
+import tempfile
 
 import pysubs2
 import attr
@@ -21,20 +20,6 @@ class NonErrorFilter:
     def filter(self, record):
         return record.levelno < logging.WARNING
 
-log = logging.getLogger('sonar')
-log.propagate = False
-_err_handler = logging.StreamHandler(sys.stderr)
-_err_handler.setLevel(logging.WARNING)
-_err_handler.setFormatter(logging.Formatter(
-    '[%(asctime)s][tid:%(thread)d][%(name)s:%(levelname)s] %(message)s'))
-log.addHandler(_err_handler)
-_info_handler = logging.StreamHandler(sys.stdout)
-_info_handler.setLevel(logging.DEBUG)
-_info_handler.addFilter(NonErrorFilter(''))
-_info_handler.setFormatter(logging.Formatter('%(message)s'))
-log.addHandler(_info_handler)
-log.setLevel(logging.DEBUG)
-
 @attr.s
 class FFmpeg:
     cmd = attr.ib()
@@ -49,7 +34,6 @@ class FFmpeg:
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
     def get_image(self, path, start, time, name):
-        image_filename = name + '.png'
         try:
             self.run(
                 '-ss', str(start / 1000),
@@ -60,11 +44,12 @@ class FFmpeg:
                     path.replace("'", r"\'").replace(':', r'\:')),
                 '-vframes', '1',
                 '-f', 'image2',
-                image_filename)
-        except Exception as err:
+                name)
+        except subprocess.CalledProcessError as err:
             try:
-                os.unlink(image_filename)
-            except Exception: pass    
+                # delete the file incase ffmpeg actually wrote something
+                os.unlink(name)
+            except os.error: pass    
             self.run(
                 '-ss', str(start / 1000),
                 '-i', path,
@@ -74,8 +59,7 @@ class FFmpeg:
                 '-map', '[v]',
                 '-vframes', '1',
                 '-f', 'image2',
-                image_filename)
-        return image_filename
+                name)
 
 @attr.s
 class Result:
@@ -145,7 +129,13 @@ class Database:
         if report:
             report(path)
 
-        subs = ff.read_subs(realpath)
+        try:
+            subs = ff.read_subs(realpath)
+        except subprocess.CalledProcessError:
+            if report:
+                report("!!! Error extracting subtitles...")
+            return
+
         writer = self.ix.writer()
         for ev in subs.events:
             if ev.is_comment:
@@ -176,19 +166,41 @@ def add(dbpath, paths, relative):
         db.add(ff, path, report=report, relative=relative)
 
 @cli.command()
+@click.option('--image', '-i', type=click.Path())
+@click.option('--upload', '-u', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query):
+def search(dbpath, query, upload=False, image=None):
     if isinstance(query, (list, tuple)):
         query = ' '.join(query)
     fs_safe_query = query.strip().replace(' ', '+')
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
-    res = list(db.search(query))
-    for i, ev in enumerate(res):
-        log.debug('ev.path=%s', ev.path)
-        log.debug('ev.content=%s', ev.content)
-        ff.get_image(ev.path, ev.start, ev.midpoint, fs_safe_query + '%02d' % i)
+    r = list(db.search(query))
+
+    def do_upload(imgpath):
+        url = subprocess.check_output(['curl', '-s', '-F', 'file=@{}'.format(imgpath), 'http://0x0.st']).decode('utf-8').strip()
+        click.echo('Url: {}'.format(url))
+
+    if not r:
+        return
+
+    ev = random.choice(r)
+    click.echo('Path: {}'.format(ev.path))
+    click.echo('Time: {:.03f} - {:.03f}'.format(ev.start / 1000, ev.end / 1000))
+    click.echo('Content:')
+    for l in ev.content.splitlines():
+        click.echo('  ' + l)
+    if image:
+        ff.get_image(ev.path, ev.start, ev.midpoint, image)
+    if upload:
+        if image:
+            do_upload(image)
+        else:
+            with tempfile.TemporaryDirectory(prefix='subsearch.') as d:
+                imgpath = os.path.join(d, 'out.png')
+                ff.get_image(ev.path, ev.start, ev.midpoint, imgpath)
+                do_upload(imgpath)
 
 if __name__ == "__main__":
     cli()
