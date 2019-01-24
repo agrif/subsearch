@@ -180,7 +180,7 @@ def search(dbpath, query):
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
     res = list(db.search(query))
-    for i, ev in enumerate(eves):
+    for i, ev in enumerate(res):
         log.debug('ev.path=%s', ev.path)
         log.debug('ev.content=%s', ev.content)
         ff.get_image(ev.path, ev.start, ev.midpoint, fs_safe_query + '%02d' % i)
