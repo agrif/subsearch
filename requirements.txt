@@ -1,0 +1,4 @@
+attrs==18.2.0
+Click==7.0
+pysubs2==0.2.3
+Whoosh==2.7.4
