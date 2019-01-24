@@ -16,7 +16,7 @@ class FFmpeg:
     cmd = attr.ib()
 
     def run(self, *args):
-        #return subprocess.check_output([cmd, '-nostdin', '-y'] + args)
+        #return subprocess.check_output([self.cmd, '-nostdin', '-y'] + list(args))
         return subprocess.check_output([self.cmd, '-nostdin', '-y', '-hide_banner', '-loglevel', 'panic'] + list(args))
 
     def read_subs(self, path):
@@ -24,7 +24,10 @@ class FFmpeg:
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
     def get_image(self, path, start, time):
-        self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter:v', "subtitles='{}'".format(path.replace("'", r"\'")), '-vframes', '1', '-f', 'image2', 'out.png')
+        try:
+            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', "subtitles='{}'".format(path.replace("'", r"\'").replace(':', r'\:')), '-vframes', '1', '-f', 'image2', 'out.png')
+        except Exception:
+            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', '[0:v][0:s]overlay[v]', '-map', '[v]', '-vframes', '1', '-f', 'image2', 'out.png')
 
 @attr.s
 class Result:
