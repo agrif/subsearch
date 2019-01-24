@@ -175,7 +175,8 @@ def add(dbpath, paths, relative):
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
 def search(dbpath, query):
-    query = ' '.join(query)
+    if isinstance(query, list):
+        query = ' '.join(query)
     fs_safe_query = '+'.join(query).strip()
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
