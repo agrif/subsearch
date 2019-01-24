@@ -12,6 +12,7 @@ import whoosh.fields
 import whoosh.index
 import whoosh.qparser
 import click
+import requests
 
 @attr.s
 class NonErrorFilter:
@@ -25,9 +26,11 @@ class FFmpeg:
     cmd = attr.ib()
 
     def run(self, *args):
-        return subprocess.check_output([
+        args_actual = [
             self.cmd, '-nostdin', '-y', '-hide_banner',
-            '-loglevel', 'panic', '-nostats'] + list(args))
+            '-loglevel', 'panic', '-nostats'] + list(args)
+        # click.echo('ffmpeg-cmd=' + ' '.join(args_actual))
+        return subprocess.check_output(args_actual)
 
     def read_subs(self, path):
         out = self.run('-i', path, '-f', 'ass', '-')
@@ -46,10 +49,6 @@ class FFmpeg:
                 '-f', 'image2',
                 name)
         except subprocess.CalledProcessError as err:
-            try:
-                # delete the file incase ffmpeg actually wrote something
-                os.unlink(name)
-            except os.error: pass    
             self.run(
                 '-ss', str(start / 1000),
                 '-i', path,
@@ -167,40 +166,44 @@ def add(dbpath, paths, relative):
 
 @cli.command()
 @click.option('--image', '-i', type=click.Path())
+@click.option('--rand', '-R', is_flag=True)
 @click.option('--upload', '-u', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query, upload=False, image=None):
+def search(dbpath, query, upload=False, image=None, rand=False):
     if isinstance(query, (list, tuple)):
         query = ' '.join(query)
-    fs_safe_query = query.strip().replace(' ', '+')
+    if image is None:
+        image = query.strip().replace(' ', '+') + '.png'
+    image_fn = image
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
     r = list(db.search(query))
 
     def do_upload(imgpath):
-        url = subprocess.check_output(['curl', '-s', '-F', 'file=@{}'.format(imgpath), 'http://0x0.st']).decode('utf-8').strip()
-        click.echo('Url: {}'.format(url))
+        with open(imgpath, 'rb') as imghandle:
+            resp = requests.post('https://0x0.st/', files={'file': imghandle})
+        click.echo('Url: {}'.format(resp.text.strip()))
 
     if not r:
         return
 
-    ev = random.choice(r)
-    click.echo('Path: {}'.format(ev.path))
-    click.echo('Time: {:.03f} - {:.03f}'.format(ev.start / 1000, ev.end / 1000))
-    click.echo('Content:')
-    for l in ev.content.splitlines():
-        click.echo('  ' + l)
-    if image:
-        ff.get_image(ev.path, ev.start, ev.midpoint, image)
-    if upload:
-        if image:
-            do_upload(image)
-        else:
-            with tempfile.TemporaryDirectory(prefix='subsearch.') as d:
-                imgpath = os.path.join(d, 'out.png')
-                ff.get_image(ev.path, ev.start, ev.midpoint, imgpath)
-                do_upload(imgpath)
+    res = [random.choice(r),] if rand else r
+
+    for i, ev in enumerate(res):
+        click.echo('Path: {}'.format(ev.path))
+        click.echo('Time: {:.03f} - {:.03f}'.format(ev.start / 1000, ev.end / 1000))
+        click.echo('Content: {}'.format(' \\ '.join(ev.content.strip().splitlines())))
+
+        if not rand:
+            base, ext = os.path.splitext(image)
+            image_fn = '%s%03d%s' % (base, i, ext)
+
+        ff.get_image(ev.path, ev.start, ev.midpoint, image_fn)
+        click.echo('Image: {}'.format(image_fn))
+
+        if upload:
+            do_upload(image_fn)
 
 if __name__ == "__main__":
     cli()
