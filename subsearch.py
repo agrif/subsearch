@@ -3,6 +3,7 @@ import subprocess
 import json
 import os
 import random
+import tempfile
 
 import pysubs2
 import attr
@@ -23,11 +24,11 @@ class FFmpeg:
         out = self.run('-i', path, '-f', 'ass', '-')
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
-    def get_image(self, path, start, time):
+    def get_image(self, path, start, time, outpath):
         try:
-            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', "subtitles='{}'".format(path.replace("'", r"\'").replace(':', r'\:')), '-vframes', '1', '-f', 'image2', 'out.png')
-        except Exception:
-            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', '[0:v][0:s]overlay[v]', '-map', '[v]', '-vframes', '1', '-f', 'image2', 'out.png')
+            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', "subtitles='{}'".format(path.replace("'", r"\'").replace(':', r'\:')), '-vframes', '1', '-f', 'image2', outpath)
+        except subprocess.CalledProcessError:
+            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', '[0:v][0:s]overlay[v]', '-map', '[v]', '-vframes', '1', '-f', 'image2', outpath)
 
 @attr.s
 class Result:
@@ -97,7 +98,13 @@ class Database:
         if report:
             report(path)
 
-        subs = ff.read_subs(realpath)
+        try:
+            subs = ff.read_subs(realpath)
+        except subprocess.CalledProcessError:
+            if report:
+                report("!!! Error extracting subtitles...")
+            return
+
         writer = self.ix.writer()
         for ev in subs.events:
             if ev.is_comment:
@@ -128,18 +135,39 @@ def add(dbpath, paths, relative):
         db.add(ff, path, report=report, relative=relative)
 
 @cli.command()
+@click.option('--image', '-i', type=click.Path())
+@click.option('--upload', '-u', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query):
+def search(dbpath, query, upload=False, image=None):
     query = ' '.join(query)
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
     r = list(db.search(query))
-    if r:
-        ev = random.choice(r)
-        print(ev.path)
-        print(ev.content)
-        ff.get_image(ev.path, ev.start, ev.midpoint)
+
+    def do_upload(imgpath):
+        url = subprocess.check_output(['curl', '-s', '-F', 'file=@{}'.format(imgpath), 'http://0x0.st']).decode('utf-8').strip()
+        click.echo('Url: {}'.format(url))
+
+    if not r:
+        return
+
+    ev = random.choice(r)
+    click.echo('Path: {}'.format(ev.path))
+    click.echo('Time: {:.03f} - {:.03f}'.format(ev.start / 1000, ev.end / 1000))
+    click.echo('Content:')
+    for l in ev.content.splitlines():
+        click.echo('  ' + l)
+    if image:
+        ff.get_image(ev.path, ev.start, ev.midpoint, image)
+    if upload:
+        if image:
+            do_upload(image)
+        else:
+            with tempfile.TemporaryDirectory(prefix='subsearch.') as d:
+                imgpath = os.path.join(d, 'out.png')
+                ff.get_image(ev.path, ev.start, ev.midpoint, imgpath)
+                do_upload(imgpath)
 
 if __name__ == "__main__":
     cli()
