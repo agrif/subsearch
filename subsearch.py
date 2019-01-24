@@ -2,7 +2,10 @@
 import subprocess
 import json
 import os
+import os.path
 import random
+import logging
+import sys
 
 import pysubs2
 import attr
@@ -12,22 +15,63 @@ import whoosh.qparser
 import click
 
 @attr.s
+class NonErrorFilter:
+    name = attr.ib()
+
+    def filter(self, record):
+        return record.levelno < logging.WARNING
+
+log = logging.getLogger('sonar')
+log.propagate = False
+_err_handler = logging.StreamHandler(sys.stderr)
+_err_handler.setLevel(logging.WARNING)
+_err_handler.setFormatter(logging.Formatter(
+    '[%(asctime)s][tid:%(thread)d][%(name)s:%(levelname)s] %(message)s'))
+log.addHandler(_err_handler)
+_info_handler = logging.StreamHandler(sys.stdout)
+_info_handler.setLevel(logging.DEBUG)
+_info_handler.addFilter(NonErrorFilter(''))
+_info_handler.setFormatter(logging.Formatter('%(message)s'))
+log.addHandler(_info_handler)
+log.setLevel(logging.DEBUG)
+
+@attr.s
 class FFmpeg:
     cmd = attr.ib()
 
     def run(self, *args):
-        #return subprocess.check_output([self.cmd, '-nostdin', '-y'] + list(args))
-        return subprocess.check_output([self.cmd, '-nostdin', '-y', '-hide_banner', '-loglevel', 'panic'] + list(args))
+        return subprocess.check_output([
+            self.cmd, '-nostdin', '-y', '-hide_banner',
+            '-loglevel', 'panic', '-nostats'] + list(args))
 
     def read_subs(self, path):
         out = self.run('-i', path, '-f', 'ass', '-')
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
-    def get_image(self, path, start, time):
+    def get_image(self, path, start, time, name):
         try:
-            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', "subtitles='{}'".format(path.replace("'", r"\'").replace(':', r'\:')), '-vframes', '1', '-f', 'image2', 'out.png')
-        except Exception:
-            self.run('-ss', str(start / 1000), '-i', path, '-copyts', '-ss', str(time / 1000), '-filter_complex', '[0:v][0:s]overlay[v]', '-map', '[v]', '-vframes', '1', '-f', 'image2', 'out.png')
+            self.run(
+                '-ss', str(start / 1000),
+                '-i', path,
+                '-copyts',
+                '-ss', str(time / 1000),
+                '-filter_complex', "subtitles='{}'".format(
+                    path.replace("'", r"\'").replace(':', r'\:')),
+                '-vframes', '1',
+                '-f', 'image2',
+                name + '.png')
+        except Exception as err:
+            log.debug('Caught exception from SS method: %s', err)
+            self.run(
+                '-ss', str(start / 1000),
+                '-i', path,
+                '-copyts',
+                '-ss', str(time / 1000),
+                '-filter_complex', '[0:v][0:s]overlay[v]',
+                '-map', '[v]',
+                '-vframes', '1',
+                '-f', 'image2',
+                name + '.png')
 
 @attr.s
 class Result:
@@ -132,14 +176,14 @@ def add(dbpath, paths, relative):
 @click.argument('query', nargs=-1)
 def search(dbpath, query):
     query = ' '.join(query)
+    fs_safe_query = '+'.join(query).strip()
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
-    r = list(db.search(query))
-    if r:
-        ev = random.choice(r)
-        print(ev.path)
-        print(ev.content)
-        ff.get_image(ev.path, ev.start, ev.midpoint)
+    res = list(db.search(query))
+    for i, ev in enumerate(eves):
+        log.debug('ev.path=%s', ev.path)
+        log.debug('ev.content=%s', ev.content)
+        ff.get_image(ev.path, ev.start, ev.midpoint, fs_safe_query + '%02d' % i)
 
 if __name__ == "__main__":
     cli()
