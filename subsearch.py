@@ -83,6 +83,11 @@ class FFmpeg:
                     '-pass', str(p),
                     '-f', 'webm',
                     name)
+        finally:
+            # remove ffmpeg pass log file if it exists
+            try:
+                os.unlink('ffmpeg2pass-0.log')
+            except os.error: pass
 
     def get_image(self, path, start, time, name):
         try:
