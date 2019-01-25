@@ -50,29 +50,39 @@ class FFmpeg:
 
     def get_clip(self, path, start, time, name):
         try:
-            self.run(
-                '-ss', str(start),
-                '-i', path,
-                '-t', str(time),
-                '-filter_complex', "subtitles='{}'".format(
-                    path.replace("'", r"\'").replace(':', r'\:')),
-                '-vcodec', 'libvpx',
-                '-acodec', 'libopus',
-                '-b:a', '128k',
-                '-f', 'webm',
-                name)
+            for p in range(1, 3):
+                self.run(
+                    '-y',
+                    '-ss', str(start),
+                    '-i', path,
+                    '-t', str(time),
+                    '-filter_complex', "subtitles='{}'".format(
+                        path.replace("'", r"\'").replace(':', r'\:')),
+                    '-c:v', 'libvpx-vp9',
+                    '-crf', '15',
+                    '-b:v', '0',
+                    '-c:a', 'libopus',
+                    '-b:a', '128k',
+                    '-pass', str(p),
+                    '-f', 'webm',
+                    name)
         except subprocess.CalledProcessError as err:
-            self.run(
-                '-ss', str(start),
-                '-i', path,
-                '-t', str(time),
-                '-filter_complex', '[0:v][0:s]overlay[v]',
-                '-map', '[v]',
-                '-vcodec', 'libvpx',
-                '-acodec', 'libopus',
-                '-b:a', '128k',
-                '-f', 'webm',
-                name)
+            for p in range(1, 3):
+                self.run(
+                    '-y',
+                    '-ss', str(start),
+                    '-i', path,
+                    '-t', str(time),
+                    '-filter_complex', '[0:v][0:s]overlay[v]',
+                    '-map', '[v]',
+                    '-c:v', 'libvpx-vp9',
+                    '-crf', '15',
+                    '-b:v', '0',
+                    '-c:a', 'libopus',
+                    '-b:a', '128k',
+                    '-pass', str(p),
+                    '-f', 'webm',
+                    name)
 
     def get_image(self, path, start, time, name):
         try:
