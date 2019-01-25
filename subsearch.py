@@ -5,6 +5,7 @@ import os
 import os.path
 import random
 import tempfile
+import re
 
 import pysubs2
 import attr
@@ -15,26 +16,61 @@ import click
 import requests
 
 @attr.s
-class NonErrorFilter:
-    name = attr.ib()
-
-    def filter(self, record):
-        return record.levelno < logging.WARNING
-
-@attr.s
 class FFmpeg:
     cmd = attr.ib()
 
-    def run(self, *args):
+    def run(self, *args, **kwargs):
         args_actual = [
             self.cmd, '-nostdin', '-y', '-hide_banner',
             '-loglevel', 'panic', '-nostats'] + list(args)
-        # click.echo('ffmpeg-cmd=' + ' '.join(args_actual))
-        return subprocess.check_output(args_actual)
+        # click.echo('# ' + ' '.join(args_actual))
+        return subprocess.run(args_actual, check=True, stdout=subprocess.PIPE, **kwargs)
 
     def read_subs(self, path):
-        out = self.run('-i', path, '-f', 'ass', '-')
+        out = self.run('-i', path, '-f', 'ass', '-').stdout
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
+
+    def read_silences(self, path, noise=-20):
+        # need loglevel=info here because silencedetect outputs via log and
+        # loglevel=panic is set by run()
+        out = self.run('-loglevel', 'info',
+            '-i', path,
+            '-af', 'silencedetect=noise=%ddB:d=0.4' % noise,
+            '-f', 'null', '-', stderr=subprocess.PIPE).stderr.decode('utf-8')
+
+        silence_starts = re.findall(r'silence_start:\s+([\de.+-]+)', out)
+        silence_ends = re.findall(r'silence_end:\s+([\d.e+-]+)', out)
+        silence_durations = re.findall(r'silence_end.*silence_duration:\s+([\d.e+-]+)', out)
+
+        if len(silence_starts) != len(silence_ends) or len(silence_starts) != len(silence_durations):
+            raise ValueError('Non-matching length of silence detections: %d/%d/%d' % 
+                (silence_starts, silence_ends, silence_durations))
+
+        return sorted(zip(map(float, silence_starts), map(float, silence_ends), map(float, silence_durations)), key=lambda s: s[0])
+
+    def get_clip(self, path, start, time, name):
+        try:
+            self.run(
+                '-ss', str(start),
+                '-i', path,
+                '-t', str(time),
+                '-filter_complex', "subtitles='{}'".format(
+                    path.replace("'", r"\'").replace(':', r'\:')),
+                '-vcodec', 'libvpx',
+                '-acodec', 'libvorbis',
+                '-f', 'webm',
+                name)
+        except subprocess.CalledProcessError as err:
+            self.run(
+                '-ss', str(start),
+                '-i', path,
+                '-t', str(time),
+                '-filter_complex', '[0:v][0:s]overlay[v]',
+                '-map', '[v]',
+                '-vcodec', 'libvpx',
+                '-acodec', 'libvorbis',
+                '-f', 'webm',
+                name)
 
     def get_image(self, path, start, time, name):
         try:
@@ -168,13 +204,16 @@ def add(dbpath, paths, relative):
 @click.option('--image', '-i', type=click.Path())
 @click.option('--rand', '-R', is_flag=True)
 @click.option('--upload', '-u', is_flag=True)
+@click.option('--webm', '-w', is_flag=True)
+@click.option('--noise', '-n', default=-20, type=int)
+@click.option('--wiggle', '-W', default=1.0, type=float)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query, upload=False, image=None, rand=False):
+def search(dbpath, query, upload=False, image=None, rand=False, webm=False, noise=-20, wiggle=1.0):
     if isinstance(query, (list, tuple)):
         query = ' '.join(query)
     if image is None:
-        image = query.strip().replace(' ', '+') + '.png'
+        image = query.strip().replace(' ', '+') + ('.webm' if webm else '.png')
     image_fn = image
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
@@ -193,17 +232,60 @@ def search(dbpath, query, upload=False, image=None, rand=False):
     for i, ev in enumerate(res):
         click.echo('Path: {}'.format(ev.path))
         click.echo('Time: {:.03f} - {:.03f}'.format(ev.start / 1000, ev.end / 1000))
-        click.echo('Content: {}'.format(' \\ '.join(ev.content.strip().splitlines())))
+        click.echo('Content: {}'.format(' \\ '.join(line.strip()
+            for line in ev.content.strip().splitlines())))
 
         if not rand:
             base, ext = os.path.splitext(image)
             image_fn = '%s%03d%s' % (base, i, ext)
 
-        ff.get_image(ev.path, ev.start, ev.midpoint, image_fn)
+        if webm:
+            try:
+                click.echo('Finding silences for webm clipping, this will take some time')
+                silences = ff.read_silences(ev.path, noise=noise)
+            except ValueError:
+                # silently fall back to using subtitle event times
+                silences = []
+            start, duration = get_clip_times(ev, silences, wiggle)
+            click.echo('Rendering webm clip, this will also take some time')
+            ff.get_clip(ev.path, start, duration, image_fn)
+        else:
+            ff.get_image(ev.path, ev.start, ev.midpoint, image_fn)
         click.echo('Image: {}'.format(image_fn))
 
         if upload:
             do_upload(image_fn)
+
+def get_clip_times(event, silences, wiggle=1.0):
+    ev_start = event.start / 1000
+    ev_end = event.end / 1000
+    pre_silence = post_silence = None
+    clip_start = ev_start - (wiggle / 2)
+    clip_duration = (ev_end - ev_start) + (wiggle / 2)
+
+    for (start, end, dur) in silences:
+        # find preceding silence
+        if ev_start - wiggle <= end and \
+                end <= ev_start + wiggle:
+            pre_silence = (start, end, dur)
+            break
+    for (start, end, dur) in silences[::-1]:
+        # find following silence
+        if ev_end - wiggle <= start and \
+                start <= ev_end + wiggle:
+            post_silence = (start, end, dur)
+            break
+
+    if pre_silence is not None:
+        clip_start = max(pre_silence[0] + (pre_silence[2]/2), ev_start - wiggle)
+    if post_silence is not None:
+        clip_duration = min((post_silence[0] + (post_silence[2]/2)) - clip_start, ev_end + wiggle)
+
+    if clip_duration < 0:
+        raise ValueError('Invalid clip duration selected: {}'.format(clip_duration))
+
+    return clip_start, clip_duration
+
 
 if __name__ == "__main__":
     cli()
