@@ -57,7 +57,8 @@ class FFmpeg:
                 '-filter_complex', "subtitles='{}'".format(
                     path.replace("'", r"\'").replace(':', r'\:')),
                 '-vcodec', 'libvpx',
-                '-acodec', 'libvorbis',
+                '-acodec', 'libopus',
+                '-b:a', '128k',
                 '-f', 'webm',
                 name)
         except subprocess.CalledProcessError as err:
@@ -68,7 +69,8 @@ class FFmpeg:
                 '-filter_complex', '[0:v][0:s]overlay[v]',
                 '-map', '[v]',
                 '-vcodec', 'libvpx',
-                '-acodec', 'libvorbis',
+                '-acodec', 'libopus',
+                '-b:a', '128k',
                 '-f', 'webm',
                 name)
 
@@ -207,9 +209,10 @@ def add(dbpath, paths, relative):
 @click.option('--webm', '-w', is_flag=True)
 @click.option('--noise', '-n', default=-20, type=int)
 @click.option('--wiggle', '-W', default=1.0, type=float)
+@click.option('--accurate', '-A', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query, upload=False, image=None, rand=False, webm=False, noise=-20, wiggle=1.0):
+def search(dbpath, query, upload=False, image=None, rand=False, webm=False, noise=-20, wiggle=1.0, accurate=False):
     if isinstance(query, (list, tuple)):
         query = ' '.join(query)
     if image is None:
@@ -240,12 +243,15 @@ def search(dbpath, query, upload=False, image=None, rand=False, webm=False, nois
             image_fn = '%s%03d%s' % (base, i, ext)
 
         if webm:
-            try:
-                click.echo('Finding silences for webm clipping, this will take some time')
-                silences = ff.read_silences(ev.path, noise=noise)
-            except ValueError:
-                # silently fall back to using subtitle event times
+            if not accurate:
                 silences = []
+            else:
+                try:
+                    click.echo('Finding silences for webm clipping, this will take some time')
+                    silences = ff.read_silences(ev.path, noise=noise)
+                except ValueError:
+                    # silently fall back to using subtitle event times
+                    silences = []
             start, duration = get_clip_times(ev, silences, wiggle)
             click.echo('Rendering webm clip, this will also take some time')
             ff.get_clip(ev.path, start, duration, image_fn)
