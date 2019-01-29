@@ -6,6 +6,9 @@ import os.path
 import random
 import tempfile
 import re
+import glob
+import hashlib
+import gzip
 
 import pysubs2
 import attr
@@ -20,31 +23,68 @@ class FFmpeg:
     cmd = attr.ib()
 
     def run(self, *args, **kwargs):
+        run_args = {
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.DEVNULL,
+            'check': True,
+        }
+        run_args.update(kwargs)
         args_actual = [
             self.cmd, '-nostdin', '-y', '-hide_banner',
             '-loglevel', 'panic', '-nostats'] + list(args)
-        # click.echo('# ' + ' '.join(args_actual))
-        return subprocess.run(args_actual, check=True, stdout=subprocess.PIPE, **kwargs)
+        # click.echo('# ' + ' '.join(args_actual), err=True)
+        return subprocess.run(args_actual, **run_args)
 
     def read_subs(self, path):
         out = self.run('-i', path, '-f', 'ass', '-').stdout
         return pysubs2.SSAFile.from_string(out.decode('utf-8'))
 
-    def read_silences(self, path, noise=-20):
+    def read_duration(self, path):
+        out = subprocess.run(
+            [self.cmd.replace('ffmpeg', 'ffprobe'), '-hide_banner',
+                '-i', path, '-show_format'],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode('utf-8')
+        duration = float(re.search(r'duration=([\d.]+)', out).group(1))
+
+        return duration
+
+    def read_volume_stats(self, path):
+        # use the duration to skip the first and last 20% of the file, as a
+        #   quick and dirty way to try to skip OP and ED so they don't affect the
+        #   volume analysis
+        dur = self.read_duration(path)
+        out = self.run('-loglevel', 'info',
+            '-ss', str(dur * 0.2),
+            '-i', path,
+            '-t', str(dur * 0.6),
+            '-vn', '-af', 'volumedetect',
+            '-f', 'null',
+            '-',
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE).stderr.decode('utf-8')
+        mean_vol = float(re.search(r'mean_volume: ([\d.-]+)', out).group(1))
+        max_vol = float(re.search(r'max_volume: ([\d.-]+)', out).group(1))
+
+        return mean_vol, max_vol
+
+    def read_silences(self, path, noise=-30, duration=0.3):
         # need loglevel=info here because silencedetect outputs via log and
-        # loglevel=panic is set by run()
+        #   loglevel=panic is set by run()
         out = self.run('-loglevel', 'info',
             '-i', path,
-            '-af', 'silencedetect=noise=%ddB:d=0.4' % noise,
-            '-f', 'null', '-', stderr=subprocess.PIPE).stderr.decode('utf-8')
+            '-af', 'silencedetect=noise={:1.1f}dB:d={:1.2f}'.format(noise, duration),
+            '-f', 'null',
+            '-',
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE).stderr.decode('utf-8')
 
-        silence_starts = re.findall(r'silence_start:\s+([\de.+-]+)', out)
+        silence_starts = re.findall(r'silence_start:\s+([\d.e+-]+)', out)
         silence_ends = re.findall(r'silence_end:\s+([\d.e+-]+)', out)
         silence_durations = re.findall(r'silence_end.*silence_duration:\s+([\d.e+-]+)', out)
 
         if len(silence_starts) != len(silence_ends) or len(silence_starts) != len(silence_durations):
-            raise ValueError('Non-matching length of silence detections: %d/%d/%d' % 
-                (silence_starts, silence_ends, silence_durations))
+            raise ValueError('Non-matching length of silence detections: starts=%d ends=%d dur=%d' % 
+                (len(silence_starts), len(silence_ends), len(silence_durations)))
 
         return sorted(zip(map(float, silence_starts), map(float, silence_ends), map(float, silence_durations)), key=lambda s: s[0])
 
@@ -90,9 +130,10 @@ class FFmpeg:
                     name)
         finally:
             # remove ffmpeg pass log file if it exists
-            try:
-                os.unlink('ffmpeg2pass-0.log')
-            except os.error: pass
+            for fn in glob.glob('ffmpeg2pass-*.log'):
+                try:
+                    os.unlink(fn)
+                except os.error: pass
 
     def get_image(self, path, start, time, name):
         try:
@@ -130,10 +171,50 @@ class Result:
         return (self.start + self.end) / 2
 
 @attr.s
+class Cache:
+    path = attr.ib(default='.cache')
+
+    @classmethod
+    def open(cls, path):
+        os.makedirs(path, mode=0o770, exist_ok=True)
+        return cls(path)
+
+    def get(self, key, miss=None):
+        p = self._normalize_key(key)
+        try:
+            with gzip.open(p, 'rt') as cf:
+                value = json.load(cf)
+        except os.error:
+            try:
+                value = miss()
+                self.set(key, value)
+            except TypeError:
+                value = miss
+        return value
+
+
+    def set(self, key, value):
+        with gzip.open(self._normalize_key(key), 'wt') as cf:
+            json.dump(value, cf)
+        return value
+
+    def pop(self, key):
+        value = self.get(key)
+        os.unlink(self._normalize_key(key))
+        return value
+
+    def _normalize_key(self, key):
+        return os.path.join(self.path, '{}.json.gz'.format(
+            hashlib.sha1(json.dumps(key).encode('utf-8')).hexdigest()))
+
+@attr.s
 class Database:
+    CACHE_DIR_NAME = 'audio-cache'
+
     path = attr.ib()
     ix = attr.ib()
     relative = attr.ib()
+    cache = attr.ib()
     
     @classmethod
     def create(cls, path, relative=False):
@@ -150,14 +231,16 @@ class Database:
         ix = whoosh.index.create_in(path, schema)
         with open(os.path.join(path, 'subsearch-config.json'), 'w') as f:
             json.dump(config, f)
-        return cls(path, ix, relative)
+        cache = Cache.open(os.path.join(path, cls.CACHE_DIR_NAME))
+        return cls(path, ix, relative, cache)
 
     @classmethod
     def open(cls, path):
         ix = whoosh.index.open_dir(path)
         with open(os.path.join(path, 'subsearch-config.json')) as f:
             config = json.load(f)
-        return cls(path, ix, **config)
+        cache = Cache.open(os.path.join(path, cls.CACHE_DIR_NAME))
+        return cls(path, ix, cache=cache, **config)
 
     def search(self, query, **kwargs):
         q = whoosh.qparser.QueryParser("content", self.ix.schema).parse(query)
@@ -172,11 +255,11 @@ class Database:
             full = os.path.join(path, d)
             self.add(ff, full, **kwargs)
 
-    def add(self, ff, path, report=None, relative=None):
+    def add(self, ff, path, report=None, relative=None, process_audio=False, wiggle=1.0):
         if relative is None:
             relative = self.relative
         if os.path.isdir(path):
-            return self.add_recursive(ff, path, report=report, relative=relative)
+            return self.add_recursive(ff, path, report=report, relative=relative, process_audio=process_audio)
 
         realpath = path
         if relative:
@@ -200,6 +283,13 @@ class Database:
             writer.add_document(path=path, start=ev.start, end=ev.end, content=ev.plaintext)
         writer.commit()
 
+        if process_audio:
+            mean_vol, _ = self.cache.set((path, 'volume_stats'),
+                ff.read_volume_stats(path))
+            self.cache.set((path, 'silences'),
+                ff.read_silences(path, noise=mean_vol * 0.9, duration=0.3 * wiggle))
+
+
 @click.group()
 def cli():
     pass
@@ -212,27 +302,28 @@ def init(dbpath, relative):
 
 @cli.command()
 @click.option('--relative/--absolute', '-r/-a', is_flag=True, default=None)
+@click.option('--wiggle', '-W', default=1.0, type=float)
+@click.option('--audio', '-A', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('paths', nargs=-1, type=click.Path(exists=True))
-def add(dbpath, paths, relative):
+def add(dbpath, paths, relative, audio=False, wiggle=1.0):
     db = Database.open(dbpath)
     ff = FFmpeg('ffmpeg')
     def report(s):
         click.echo('adding: {}'.format(s))
     for path in paths:
-        db.add(ff, path, report=report, relative=relative)
+        db.add(ff, path, report=report, relative=relative, process_audio=audio, wiggle=wiggle)
 
 @cli.command()
 @click.option('--image', '-i', type=click.Path())
 @click.option('--rand', '-R', is_flag=True)
 @click.option('--upload', '-u', is_flag=True)
 @click.option('--webm', '-w', is_flag=True)
-@click.option('--noise', '-n', default=-20, type=int)
 @click.option('--wiggle', '-W', default=1.0, type=float)
 @click.option('--accurate', '-A', is_flag=True)
 @click.argument('dbpath', type=click.Path())
 @click.argument('query', nargs=-1)
-def search(dbpath, query, upload=False, image=None, rand=False, webm=False, noise=-20, wiggle=1.0, accurate=False):
+def search(dbpath, query, upload=False, image=None, rand=False, webm=False, wiggle=1.0, accurate=False):
     if isinstance(query, (list, tuple)):
         query = ' '.join(query)
     if image is None:
@@ -263,17 +354,23 @@ def search(dbpath, query, upload=False, image=None, rand=False, webm=False, nois
             image_fn = '%s%03d%s' % (base, i, ext)
 
         if webm:
-            if not accurate:
-                silences = []
-            else:
+            silences = []
+            if accurate:
+                click.echo('Finding silences for accurate clipping, this will take some time')
                 try:
-                    click.echo('Finding silences for webm clipping, this will take some time')
-                    silences = ff.read_silences(ev.path, noise=noise)
+                    mean_vol, _ = db.cache.get((ev.path, 'volume_stats'),
+                        lambda: ff.read_volume_stats(ev.path))
+                    silences = db.cache.get((ev.path, 'silences'),
+                        lambda: ff.read_silences(ev.path, noise=mean_vol * 0.9, duration=0.3 * wiggle))
                 except ValueError:
                     # silently fall back to using subtitle event times
-                    silences = []
+                    pass
+
             start, duration = get_clip_times(ev, silences, wiggle)
-            click.echo('Rendering webm clip, this will also take some time')
+            click.echo('Adjusted clip start/end by: {:1.03f} / {:1.03f}'.format(
+                start - ev.start / 1000,
+                (start + duration) - ev.end / 1000))
+            click.echo('Rendering webm clip, this will take some time')
             ff.get_clip(ev.path, start, duration, image_fn)
         else:
             ff.get_image(ev.path, ev.start, ev.midpoint, image_fn)
@@ -285,30 +382,31 @@ def search(dbpath, query, upload=False, image=None, rand=False, webm=False, nois
 def get_clip_times(event, silences, wiggle=1.0):
     ev_start = event.start / 1000
     ev_end = event.end / 1000
-    pre_silence = post_silence = None
     clip_start = ev_start - (wiggle / 2)
-    clip_duration = (ev_end - ev_start) + (wiggle / 2)
+    clip_duration = (ev_end - ev_start) + wiggle
 
     for (start, end, dur) in silences:
         # find preceding silence
         if ev_start - wiggle <= end and \
                 end <= ev_start + wiggle:
-            pre_silence = (start, end, dur)
+
+            clip_start = max(
+                end - min(dur / 3, wiggle / 2),
+                ev_start - wiggle,
+                0)
             break
+
     for (start, end, dur) in silences[::-1]:
         # find following silence
         if ev_end - wiggle <= start and \
                 start <= ev_end + wiggle:
-            post_silence = (start, end, dur)
+
+            clip_duration = max(
+                min(
+                    (start + (min(dur / 3, wiggle / 2))) - clip_start,
+                    (ev_end + wiggle) - clip_start),
+                0)
             break
-
-    if pre_silence is not None:
-        clip_start = max(pre_silence[0] + (pre_silence[2]/2), ev_start - wiggle)
-    if post_silence is not None:
-        clip_duration = min((post_silence[0] + (post_silence[2]/2)) - clip_start, ev_end + wiggle)
-
-    if clip_duration < 0:
-        raise ValueError('Invalid clip duration selected: {}'.format(clip_duration))
 
     return clip_start, clip_duration
 
