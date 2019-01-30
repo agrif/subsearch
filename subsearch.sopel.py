@@ -47,7 +47,11 @@ def setup(bot):
 
 @sopel.module.commands('animeme')
 def cmd_animeme(bot, trigger):
-    words = trigger.group(2).strip().lower().split()
+    webm = False
+    words = trigger.group(2).strip()
+    if '-webm' in words:
+        webm = True
+        words = words.replace('-webm', '')
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             proc = subprocess.run([
@@ -55,7 +59,7 @@ def cmd_animeme(bot, trigger):
                     bot.config.sonar.script_path,
                     'search',
                     bot.config.sonar.db_path,
-                    '-Ru'] + words,
+                    '-RAwu' if webm else '-Ru', words],
                 cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out = proc.stdout.decode('utf-8')
         if out.strip():
