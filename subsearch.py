@@ -51,7 +51,7 @@ class FFmpeg:
             key=lambda st: len(st))
         try:
             # return longest subtitle track
-            return pysubs2.SSAFile.from_string(sub_tracks[-1])
+            return sub_tracks[-1]
         except IndexError:
             raise ValueError('No subtitle tracks found')
 
@@ -106,25 +106,27 @@ class FFmpeg:
 
     def get_clip(self, path, start, time, name):
         try:
-            for p in range(1, 3):
-                self.run(
-                    '-y',
-                    '-ss', str(start),
-                    '-i', path,
-                    '-copyts',
-                    '-sn',
-                    '-t', str(time),
-                    '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
-                        path.replace("'", r"\'").replace(':', r'\:')),
-                    '-map', '[v0]', '-map', '[a0]',
-                    '-c:v', 'libvpx-vp9',
-                    '-crf', '15',
-                    '-b:v', '0',
-                    '-c:a', 'libopus',
-                    '-b:a', '128k',
-                    '-pass', str(p),
-                    '-f', 'webm',
-                    name)
+            with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
+                temp_f.write(self.read_subs(path).encode('utf-8'))
+                for p in range(1, 3):
+                    self.run(
+                        '-y',
+                        '-ss', str(start),
+                        '-i', path,
+                        '-copyts',
+                        '-sn',
+                        '-t', str(time),
+                        '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                            temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                        '-map', '[v0]', '-map', '[a0]',
+                        '-c:v', 'libvpx-vp9',
+                        '-crf', '15',
+                        '-b:v', '0',
+                        '-c:a', 'libopus',
+                        '-b:a', '128k',
+                        '-pass', str(p),
+                        '-f', 'webm',
+                        name)
         except subprocess.CalledProcessError as err:
             for p in range(1, 3):
                 self.run(
@@ -153,16 +155,18 @@ class FFmpeg:
 
     def get_image(self, path, start, time, name):
         try:
-            self.run(
-                '-ss', str(start / 1000),
-                '-i', path,
-                '-copyts',
-                '-ss', str(time / 1000),
-                '-filter_complex', "subtitles='{}'".format(
-                    path.replace("'", r"\'").replace(':', r'\:')),
-                '-vframes', '1',
-                '-f', 'image2',
-                name)
+            with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
+                temp_f.write(self.read_subs(path).encode('utf-8'))
+                self.run(
+                    '-ss', str(start / 1000),
+                    '-i', path,
+                    '-copyts',
+                    '-ss', str(time / 1000),
+                    '-filter_complex', "subtitles='{}'".format(
+                        temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                    '-vframes', '1',
+                    '-f', 'image2',
+                    name)
         except subprocess.CalledProcessError as err:
             self.run(
                 '-ss', str(start / 1000),
@@ -286,7 +290,7 @@ class Database:
             report(path)
 
         try:
-            subs = ff.read_subs(realpath)
+            subs = pysubs2.SSAFile.from_string(ff.read_subs(realpath))
         except (subprocess.CalledProcessError, ValueError):
             if report:
                 report("!!! Error extracting subtitles...")
