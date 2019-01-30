@@ -61,15 +61,16 @@ def cmd_animeme(bot, trigger):
                     bot.config.sonar.db_path,
                     '-RAwu' if webm else '-Ru', words],
                 cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        out = proc.stdout.decode('utf-8')
-        if out.strip():
-            m = re.search(r'Url: (.*)', out)
-            if m:
-                url = m.group(1)
-                bot.reply(url)
-            else:
+        out = proc.stdout.decode('utf-8').strip()
+        if out:
+            results = dict(map(lambda e: e.strip(), l.strip().split(':', 1)) for l in out.splitlines() if ':' in l)
+            try:
+                response = '"{}" <{}>'.format(results['Url'], results['Content'])
+            except KeyError:
                 log.debug(out)
                 bot.reply('Something went wrong, no url found')
+            else:
+                bot.reply(response)
         else:
             bot.reply('Meme harder scrub')
     except Exception as err:
