@@ -43,7 +43,7 @@ class FFmpeg:
                 '-i', path],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE).stderr.decode('utf-8')
         streams = [{'stream_id': m[0], 'stream_lang': m[1], 'stream_type': m[2], 'stream_format': m[3]} \
-            for m in re.findall(r'Stream #\d+:(?P<stream_id>\d+)(?:\((?P<stream_lang>\w+)\))?: (?P<stream_type>\w+): (?P<stream_format>.*)', out)}]
+            for m in re.findall(r'Stream #\d+:(?P<stream_id>\d+)(?:\((?P<stream_lang>\w+)\))?: (?P<stream_type>\w+): (?P<stream_format>.*)', out)]
         sub_tracks = sorted(
             (get_sub_track(strm['stream_id']) for strm in streams \
                 if strm['stream_type'].lower() == 'subtitle' \
