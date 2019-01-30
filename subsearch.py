@@ -385,6 +385,9 @@ class Database:
         writer.delete_by_term('path', path)
         writer.commit()
 
+        self.cache.pop((path, 'volume_stats'))
+        self.cache.pop((path, 'silences'))
+
 
 @click.group()
 def cli():
