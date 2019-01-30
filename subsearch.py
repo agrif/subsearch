@@ -36,8 +36,24 @@ class FFmpeg:
         return subprocess.run(args_actual, **run_args)
 
     def read_subs(self, path):
-        out = self.run('-i', path, '-f', 'ass', '-').stdout
-        return pysubs2.SSAFile.from_string(out.decode('utf-8'))
+        def get_sub_track(track_id):
+            return self.run('-i', path, '-map', '0:'+track_id, '-f', 'ass', '-').stdout.decode('utf-8')
+        out = subprocess.run(
+            [self.cmd.replace('ffmpeg', 'ffprobe'), '-hide_banner',
+                '-i', path],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE).stderr.decode('utf-8')
+        streams = [{'stream_id': m[0], 'stream_lang': m[1], 'stream_type': m[2], 'stream_format': m[3]} \
+            for m in re.findall(r'Stream #\d+:(?P<stream_id>\d+)(?:\((?P<stream_lang>\w+)\))?: (?P<stream_type>\w+): (?P<stream_format>.*)', out)}]
+        sub_tracks = sorted(
+            (get_sub_track(strm['stream_id']) for strm in streams \
+                if strm['stream_type'].lower() == 'subtitle' \
+                    and strm['stream_lang'].lower() in ('', 'eng', 'und')),
+            key=lambda st: len(st))
+        try:
+            # return longest subtitle track
+            return pysubs2.SSAFile.from_string(sub_tracks[-1])
+        except IndexError:
+            raise ValueError('No subtitle tracks found')
 
     def read_duration(self, path):
         out = subprocess.run(
@@ -98,7 +114,7 @@ class FFmpeg:
                     '-copyts',
                     '-sn',
                     '-t', str(time),
-                    '-filter_complex', "[0:v]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                    '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
                         path.replace("'", r"\'").replace(':', r'\:')),
                     '-map', '[v0]', '-map', '[a0]',
                     '-c:v', 'libvpx-vp9',
@@ -118,8 +134,8 @@ class FFmpeg:
                     '-copyts',
                     '-sn',
                     '-t', str(time),
-                    '-filter_complex', '[0:v][0:s]overlay[v];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
-                    '-map', '[v]', '-map', '[a0]',
+                    '-filter_complex', '[0:V][0:s]overlay[v_out];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
+                    '-map', '[v_out]', '-map', '[a0]',
                     '-c:v', 'libvpx-vp9',
                     '-crf', '15',
                     '-b:v', '0',
@@ -271,7 +287,7 @@ class Database:
 
         try:
             subs = ff.read_subs(realpath)
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, ValueError):
             if report:
                 report("!!! Error extracting subtitles...")
             return
