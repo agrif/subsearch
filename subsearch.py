@@ -35,17 +35,20 @@ class FFmpeg:
         # click.echo('# ' + ' '.join(args_actual), err=True)
         return subprocess.run(args_actual, **run_args)
 
-    def read_subs(self, path):
-        def get_sub_track(track_id):
-            return self.run('-i', path, '-map', '0:'+track_id, '-f', 'ass', '-').stdout.decode('utf-8')
+    def read_streams(self, path):
         out = subprocess.run(
             [self.cmd.replace('ffmpeg', 'ffprobe'), '-hide_banner',
                 '-i', path],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE).stderr.decode('utf-8')
         streams = [{'stream_id': m[0], 'stream_lang': m[1], 'stream_type': m[2], 'stream_format': m[3]} \
             for m in re.findall(r'Stream #\d+:(?P<stream_id>\d+)(?:\((?P<stream_lang>\w+)\))?: (?P<stream_type>\w+): (?P<stream_format>.*)', out)]
+        return streams
+
+    def read_subs(self, path):
+        def get_sub_track(track_id):
+            return self.run('-i', path, '-map', '0:'+track_id, '-f', 'ass', '-').stdout.decode('utf-8')
         sub_tracks = sorted(
-            (get_sub_track(strm['stream_id']) for strm in streams \
+            (get_sub_track(strm['stream_id']) for strm in self.read_streams(path) \
                 if strm['stream_type'].lower() == 'subtitle' \
                     and strm['stream_lang'].lower() in ('', 'eng', 'und')),
             key=lambda st: len(st))
@@ -69,15 +72,30 @@ class FFmpeg:
         #   quick and dirty way to try to skip OP and ED so they don't affect the
         #   volume analysis
         dur = self.read_duration(path)
-        out = self.run('-loglevel', 'info',
-            '-ss', str(dur * 0.2),
-            '-i', path,
-            '-t', str(dur * 0.6),
-            '-vn', '-af', 'volumedetect',
-            '-f', 'null',
-            '-',
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE).stderr.decode('utf-8')
+        try:
+            out = self.run('-loglevel', 'info',
+                '-ss', str(dur * 0.2),
+                '-i', path,
+                '-t', str(dur * 0.6),
+                '-vn', '-filter_complex', '[0:m:language:jpn]volumedetect[a_out]',
+                '-map', '[a_out]',
+                '-f', 'null',
+                '-',
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE).stderr.decode('utf-8')
+        except subprocess.CalledProcessError:
+            out = self.run('-loglevel', 'info',
+                '-ss', str(dur * 0.2),
+                '-i', path,
+                '-t', str(dur * 0.6),
+                '-vn', '-af', 'volumedetect',
+                '-f', 'null',
+                '-',
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE).stderr.decode('utf-8')
+
         mean_vol = float(re.search(r'mean_volume: ([\d.-]+)', out).group(1))
         max_vol = float(re.search(r'max_volume: ([\d.-]+)', out).group(1))
 
@@ -86,13 +104,26 @@ class FFmpeg:
     def read_silences(self, path, noise=-30, duration=0.3):
         # need loglevel=info here because silencedetect outputs via log and
         #   loglevel=panic is set by run()
-        out = self.run('-loglevel', 'info',
-            '-i', path,
-            '-vn', '-af', 'silencedetect=noise={:1.1f}dB:d={:1.2f}'.format(noise, duration),
-            '-f', 'null',
-            '-',
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE).stderr.decode('utf-8')
+        try:
+            out = self.run('-loglevel', 'info',
+                '-i', path,
+                '-vn', '-filter_complex', '[0:m:language:jpn]silencedetect=noise={:1.1f}dB:d={:1.2f}[a_out]'.format(noise, duration),
+                '-map', '[a_out]',
+                '-f', 'null',
+                '-',
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE).stderr.decode('utf-8')
+        except subprocess.CalledProcessError:
+            out = self.run('-loglevel', 'info',
+                '-i', path,
+                '-vn', '-af', 'silencedetect=noise={:1.1f}dB:d={:1.2f}'.format(noise, duration),
+                '-f', 'null',
+                '-',
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE).stderr.decode('utf-8')
+
 
         silence_starts = re.findall(r'silence_start:\s+([\d.e+-]+)', out)
         silence_ends = re.findall(r'silence_end:\s+([\d.e+-]+)', out)
@@ -105,9 +136,10 @@ class FFmpeg:
         return sorted(zip(map(float, silence_starts), map(float, silence_ends), map(float, silence_durations)), key=lambda s: s[0])
 
     def get_clip(self, path, start, time, name):
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
-                temp_f.write(self.read_subs(path).encode('utf-8'))
+        with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
+            temp_f.write(self.read_subs(path).encode('utf-8'))
+            temp_f.flush()
+            try:
                 for p in range(1, 3):
                     self.run(
                         '-y',
@@ -116,7 +148,7 @@ class FFmpeg:
                         '-copyts',
                         '-sn',
                         '-t', str(time),
-                        '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                        '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:m:language:jpn]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
                             temp_f.name.replace("'", r"\'").replace(':', r'\:')),
                         '-map', '[v0]', '-map', '[a0]',
                         '-c:v', 'libvpx-vp9',
@@ -127,40 +159,63 @@ class FFmpeg:
                         '-pass', str(p),
                         '-f', 'webm',
                         name)
-        except subprocess.CalledProcessError as err:
-            for p in range(1, 3):
-                self.run(
-                    '-y',
-                    '-ss', str(start),
-                    '-i', path,
-                    '-copyts',
-                    '-sn',
-                    '-t', str(time),
-                    '-filter_complex', '[0:V][0:s]overlay[v_out];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
-                    '-map', '[v_out]', '-map', '[a0]',
-                    '-c:v', 'libvpx-vp9',
-                    '-crf', '15',
-                    '-b:v', '0',
-                    '-c:a', 'libopus',
-                    '-b:a', '128k',
-                    '-pass', str(p),
-                    '-f', 'webm',
-                    name)
-        finally:
-            # remove ffmpeg pass log file if it exists
-            for fn in glob.glob('ffmpeg2pass-*.log'):
+            except subprocess.CalledProcessError as err:
                 try:
-                    os.unlink(fn)
-                except os.error: pass
+                    for p in range(1, 3):
+                        self.run(
+                            '-y',
+                            '-ss', str(start),
+                            '-i', path,
+                            '-copyts',
+                            '-sn',
+                            '-t', str(time),
+                            '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                                temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                            '-map', '[v0]', '-map', '[a0]',
+                            '-c:v', 'libvpx-vp9',
+                            '-crf', '15',
+                            '-b:v', '0',
+                            '-c:a', 'libopus',
+                            '-b:a', '128k',
+                            '-pass', str(p),
+                            '-f', 'webm',
+                            name)
+                except subprocess.CalledProcessError as err:
+                    for p in range(1, 3):
+                        self.run(
+                            '-y',
+                            '-ss', str(start),
+                            '-i', path,
+                            '-copyts',
+                            '-sn',
+                            '-t', str(time),
+                            '-filter_complex', '[0:V][0:s]overlay[v_out];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
+                            '-map', '[v_out]', '-map', '[a0]',
+                            '-c:v', 'libvpx-vp9',
+                            '-crf', '15',
+                            '-b:v', '0',
+                            '-c:a', 'libopus',
+                            '-b:a', '128k',
+                            '-pass', str(p),
+                            '-f', 'webm',
+                            name)
+            finally:
+                # remove ffmpeg pass log file if it exists
+                for fn in glob.glob('ffmpeg2pass-*.log'):
+                    try:
+                        os.unlink(fn)
+                    except os.error: pass
 
     def get_image(self, path, start, time, name):
         try:
             with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
                 temp_f.write(self.read_subs(path).encode('utf-8'))
+                temp_f.flush()
                 self.run(
                     '-ss', str(start / 1000),
                     '-i', path,
                     '-copyts',
+                    '-an',
                     '-ss', str(time / 1000),
                     '-filter_complex', "subtitles='{}'".format(
                         temp_f.name.replace("'", r"\'").replace(':', r'\:')),
@@ -172,6 +227,7 @@ class FFmpeg:
                 '-ss', str(start / 1000),
                 '-i', path,
                 '-copyts',
+                '-an',
                 '-ss', str(time / 1000),
                 '-filter_complex', '[0:v][0:s]overlay[v]',
                 '-map', '[v]',
