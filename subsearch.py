@@ -72,7 +72,7 @@ class FFmpeg:
         #   loglevel=panic is set by run()
         out = self.run('-loglevel', 'info',
             '-i', path,
-            '-af', 'silencedetect=noise={:1.1f}dB:d={:1.2f}'.format(noise, duration),
+            '-vn', '-af', 'silencedetect=noise={:1.1f}dB:d={:1.2f}'.format(noise, duration),
             '-f', 'null',
             '-',
             stdout=subprocess.DEVNULL,
@@ -98,7 +98,7 @@ class FFmpeg:
                     '-copyts',
                     '-sn',
                     '-t', str(time),
-                    '-filter_complex', "[0:v]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS[a0]".format(
+                    '-filter_complex', "[0:v]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
                         path.replace("'", r"\'").replace(':', r'\:')),
                     '-map', '[v0]', '-map', '[a0]',
                     '-c:v', 'libvpx-vp9',
@@ -118,7 +118,7 @@ class FFmpeg:
                     '-copyts',
                     '-sn',
                     '-t', str(time),
-                    '-filter_complex', '[0:v][0:s]overlay[v];[0:a]asetpts=PTS-STARTPTS[a0]',
+                    '-filter_complex', '[0:v][0:s]overlay[v];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
                     '-map', '[v]', '-map', '[a0]',
                     '-c:v', 'libvpx-vp9',
                     '-crf', '15',
