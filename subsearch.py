@@ -276,7 +276,9 @@ class Cache:
 
     def pop(self, key):
         value = self.get(key)
-        os.unlink(self._normalize_key(key))
+        try:
+            os.unlink(self._normalize_key(key))
+        except os.error: pass
         return value
 
     def _normalize_key(self, key):
@@ -326,16 +328,16 @@ class Database:
                 d['path'] = os.path.normpath(os.path.join(self.path, d['path']))
                 yield Result(**d)
 
-    def add_recursive(self, ff, path, **kwargs):
+    def apply_recursive(self, method, path, *args, **kwargs):
         for d in sorted(os.listdir(path)):
             full = os.path.join(path, d)
-            self.add(ff, full, **kwargs)
+            method(full, *args, **kwargs)
 
-    def add(self, ff, path, report=None, relative=None, process_audio=False, wiggle=1.0):
+    def add(self, path, ff, report=None, relative=None, process_audio=False, wiggle=1.0):
         if relative is None:
             relative = self.relative
         if os.path.isdir(path):
-            return self.add_recursive(ff, path, report=report, relative=relative, process_audio=process_audio)
+            return self.apply_recursive(self.add, path, ff, report=report, relative=relative, process_audio=process_audio)
 
         realpath = path
         if relative:
@@ -365,6 +367,24 @@ class Database:
             self.cache.set((path, 'silences'),
                 ff.read_silences(path, noise=mean_vol * 0.9, duration=0.3 * wiggle))
 
+    def remove(self, path, report=None, relative=None):
+        if relative is None:
+            relative = self.relative
+        if os.path.isdir(path):
+            return self.apply_recursive(self.remove, path, report=report, relative=relative)
+
+        realpath = path
+        if relative:
+            path = os.path.normpath(os.path.relpath(path, self.path))
+        else:
+            path = os.path.abspath(path)
+        if report:
+            report(path)
+
+        writer = self.ix.writer()
+        writer.delete_by_term('path', path)
+        writer.commit()
+
 
 @click.group()
 def cli():
@@ -388,7 +408,18 @@ def add(dbpath, paths, relative, audio=False, wiggle=1.0):
     def report(s):
         click.echo('adding: {}'.format(s))
     for path in paths:
-        db.add(ff, path, report=report, relative=relative, process_audio=audio, wiggle=wiggle)
+        db.add(path, ff, report=report, relative=relative, process_audio=audio, wiggle=wiggle)
+
+@cli.command()
+@click.option('--relative/--absolute', '-r/-a', is_flag=True, default=None)
+@click.argument('dbpath', type=click.Path())
+@click.argument('paths', nargs=-1, type=click.Path(exists=True))
+def rm(dbpath, paths, relative):
+    db = Database.open(dbpath)
+    def report(s):
+        click.echo('removing: {}'.format(s))
+    for path in paths:
+        db.remove(path, report=report, relative=relative)
 
 @cli.command()
 @click.option('--image', '-i', type=click.Path())
