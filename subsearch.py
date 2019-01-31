@@ -50,7 +50,7 @@ class FFmpeg:
         sub_tracks = sorted(
             (get_sub_track(strm['stream_id']) for strm in self.read_streams(path) \
                 if strm['stream_type'].lower() == 'subtitle' \
-                    and strm['stream_lang'].lower() in ('', 'eng', 'jpn', 'und')),
+                    and strm['stream_lang'].lower() in ('', 'eng', 'english', 'jpn', 'japanese', 'und')),
             key=lambda st: len(st))
         try:
             # return longest subtitle track
