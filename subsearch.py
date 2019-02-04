@@ -234,6 +234,10 @@ class FFmpeg:
                 '-vframes', '1',
                 '-f', 'image2',
                 name)
+        subprocess.run(['optipng',
+                '-quiet',
+                name],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 @attr.s
 class Result:
