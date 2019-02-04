@@ -135,7 +135,7 @@ class FFmpeg:
 
         return sorted(zip(map(float, silence_starts), map(float, silence_ends), map(float, silence_durations)), key=lambda s: s[0])
 
-    def get_clip(self, path, start, time, name):
+    def get_clip(self, path, start, time, name, height=720):
         with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
             temp_f.write(self.read_subs(path).encode('utf-8'))
             temp_f.flush()
@@ -148,8 +148,8 @@ class FFmpeg:
                         '-copyts',
                         '-sn',
                         '-t', str(time),
-                        '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:m:language:jpn]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
-                            temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                        '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS,scale=-2:{:d}[v0];[0:m:language:jpn]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                            temp_f.name.replace("'", r"\'").replace(':', r'\:'), height),
                         '-map', '[v0]', '-map', '[a0]',
                         '-c:v', 'libvpx-vp9',
                         '-crf', '15',
@@ -169,8 +169,8 @@ class FFmpeg:
                             '-copyts',
                             '-sn',
                             '-t', str(time),
-                            '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
-                                temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                            '-filter_complex', "[0:V]subtitles='{}',setpts=PTS-STARTPTS,scale=-2:{:d}[v0];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]".format(
+                                temp_f.name.replace("'", r"\'").replace(':', r'\:'), height),
                             '-map', '[v0]', '-map', '[a0]',
                             '-c:v', 'libvpx-vp9',
                             '-crf', '15',
@@ -189,7 +189,7 @@ class FFmpeg:
                             '-copyts',
                             '-sn',
                             '-t', str(time),
-                            '-filter_complex', '[0:V][0:s]overlay[v_out];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]',
+                            '-filter_complex', '[0:V][0:s]overlay,scale=-2:{:d}[v_out];[0:a]asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[a0]'.format(height),
                             '-map', '[v_out]', '-map', '[a0]',
                             '-c:v', 'libvpx-vp9',
                             '-crf', '15',
@@ -206,7 +206,7 @@ class FFmpeg:
                         os.unlink(fn)
                     except os.error: pass
 
-    def get_image(self, path, start, time, name):
+    def get_image(self, path, start, time, name, height=720):
         try:
             with tempfile.NamedTemporaryFile(suffix='.ass') as temp_f:
                 temp_f.write(self.read_subs(path).encode('utf-8'))
@@ -217,8 +217,8 @@ class FFmpeg:
                     '-copyts',
                     '-an',
                     '-ss', str(time / 1000),
-                    '-filter_complex', "subtitles='{}'".format(
-                        temp_f.name.replace("'", r"\'").replace(':', r'\:')),
+                    '-filter_complex', "subtitles='{}',scale=-2:{:d}".format(
+                        temp_f.name.replace("'", r"\'").replace(':', r'\:'), height),
                     '-vframes', '1',
                     '-f', 'image2',
                     name)
@@ -229,7 +229,7 @@ class FFmpeg:
                 '-copyts',
                 '-an',
                 '-ss', str(time / 1000),
-                '-filter_complex', '[0:v][0:s]overlay[v]',
+                '-filter_complex', '[0:v][0:s]overlay,scale=-2:{:d}[v]'.format(height),
                 '-map', '[v]',
                 '-vframes', '1',
                 '-f', 'image2',
