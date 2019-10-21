@@ -5,5 +5,5 @@ Click==7.0
 idna==2.8
 pysubs2==0.2.3
 requests==2.21.0
-urllib3==1.24.1
+urllib3==1.24.2
 Whoosh==2.7.4
